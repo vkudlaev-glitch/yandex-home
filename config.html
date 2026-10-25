@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Дом — настройка токена</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; padding: 20px 16px 40px;
+    font: 16px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #f5f6f8; color: #16181d;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.lead { margin: 0 0 20px; color: #5b6472; font-size: 14px; }
+  .card {
+    background: #fff; border-radius: 12px; padding: 16px;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, .08), 0 4px 16px rgba(16, 24, 40, .06);
+    margin-bottom: 16px;
+  }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  .btn {
+    display: block; width: 100%; box-sizing: border-box;
+    padding: 14px; border: 0; border-radius: 10px;
+    font-size: 16px; font-weight: 600; text-align: center;
+    background: #1e64c8; color: #fff; cursor: pointer;
+  }
+  .btn.secondary { background: #e8edf6; color: #1e64c8; }
+  .btn:disabled { opacity: .5; }
+  textarea, input[type=password], input[type=text] {
+    width: 100%; box-sizing: border-box; padding: 12px;
+    border: 1px solid #ccd3df; border-radius: 10px;
+    font: 14px/1.4 ui-monospace, Consolas, monospace;
+    background: #fff; color: #16181d; resize: vertical;
+  }
+  textarea { min-height: 92px; }
+  .row { display: flex; gap: 8px; margin-top: 10px; }
+  .row .btn { flex: 1; }
+  .hint { font-size: 13px; color: #5b6472; margin-top: 10px; }
+  .status { margin-top: 12px; font-size: 14px; }
+  .status.ok { color: #0a7a35; }
+  .status.err { color: #b42318; }
+  .hidden { display: none; }
+  ol { margin: 0; padding-left: 20px; font-size: 14px; color: #3b4350; }
+  li { margin-bottom: 6px; }
+  code { font: 13px ui-monospace, Consolas, monospace; background: #eef1f6; padding: 1px 4px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>Дом</h1>
+  <p class="lead">Токен доступа к умному дому Яндекса. Хранится только в приложении Pebble на телефоне.</p>
+
+  <div class="card" id="oauthCard">
+    <h2>Войти через Яндекс</h2>
+    <p class="hint" style="margin-top:0">Откроется страница Яндекса, где нужно разрешить доступ к умному дому.</p>
+    <button class="btn" id="loginBtn" style="margin-top:12px">Войти через Яндекс</button>
+  </div>
+
+  <div class="card">
+    <h2>Вставить токен вручную</h2>
+    <textarea id="tokenInput" placeholder="y0_AgAAAAB..." spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
+    <div class="row">
+      <button class="btn" id="saveBtn">Сохранить</button>
+      <button class="btn secondary" id="pasteBtn">Вставить</button>
+    </div>
+    <div class="hint">Токен можно получить на <code>oauth.yandex.ru</code> или взять тот, что уже работает в приложении для Garmin.</div>
+  </div>
+
+  <div class="status" id="status"></div>
+  <div class="hint" id="payloadHint"></div>
+
+  <script>
+    // Один раз заполнить после регистрации приложения на oauth.yandex.ru:
+    // платформа «Веб-сервисы», доступы iot:view + iot:control,
+    // Redirect URI — точный адрес этой страницы.
+    var CLIENT_ID = "";
+
+    var statusEl = document.getElementById("status");
+    var hintEl = document.getElementById("payloadHint");
+    var input = document.getElementById("tokenInput");
+    var pendingExpires = 0;
+
+    function setStatus(text, kind) {
+      statusEl.textContent = text || "";
+      statusEl.className = "status" + (kind ? " " + kind : "");
+    }
+
+    // Возврат в приложение Pebble. Схема pebblejs://close — штатный способ
+    // отдать конфиг обратно; ответ приходит в webviewclosed.
+    function sendToken(token) {
+      var payloadObj = { token: token };
+      if (pendingExpires > 0) payloadObj.expires_in = pendingExpires;
+      var payload = encodeURIComponent(JSON.stringify(payloadObj));
+      setStatus("Сохраняю…", "ok");
+      try {
+        window.location.href = "pebblejs://close#" + payload;
+      } catch (e) {}
+      // Если мы не в приложении Pebble (обычный браузер), возврат не сработает:
+      // показываем токен, чтобы его можно было перенести вручную.
+      setTimeout(function () {
+        setStatus("Если приложение не закрылось — значит страница открыта не из Pebble.", "err");
+        hintEl.textContent = token;
+        hintEl.style.wordBreak = "break-all";
+      }, 900);
+    }
+
+    function parseHash() {
+      var h = window.location.hash || "";
+      if (h.charAt(0) === "#") h = h.slice(1);
+      if (!h) return null;
+      var out = {};
+      h.split("&").forEach(function (pair) {
+        var i = pair.indexOf("=");
+        if (i < 0) return;
+        out[decodeURIComponent(pair.slice(0, i))] = decodeURIComponent(pair.slice(i + 1));
+      });
+      return out;
+    }
+
+    function currentUrl() {
+      return window.location.origin + window.location.pathname;
+    }
+
+    function initOauth() {
+      var card = document.getElementById("oauthCard");
+      if (!CLIENT_ID) {
+        card.classList.add("hidden");
+        return;
+      }
+      document.getElementById("loginBtn").addEventListener("click", function () {
+        var url = "https://oauth.yandex.ru/authorize?response_type=token" +
+          "&client_id=" + encodeURIComponent(CLIENT_ID) +
+          "&redirect_uri=" + encodeURIComponent(currentUrl());
+        window.location.href = url;
+      });
+    }
+
+    function initHash() {
+      var params = parseHash();
+      if (!params) return;
+      if (params.access_token) {
+        input.value = params.access_token;
+        pendingExpires = Number(params.expires_in) || 0;
+        setStatus("Токен получен. Нажмите «Сохранить».", "ok");
+        // убираем токен из адресной строки, чтобы он не остался в истории
+        try { history.replaceState(null, "", currentUrl()); } catch (e) {}
+      } else if (params.error) {
+        setStatus("Яндекс не выдал доступ: " + params.error, "err");
+      }
+    }
+
+    document.getElementById("saveBtn").addEventListener("click", function () {
+      var token = (input.value || "").trim();
+      if (!token) {
+        setStatus("Вставьте токен.", "err");
+        return;
+      }
+      if (!/^[A-Za-z0-9_\-\.]+$/.test(token)) {
+        setStatus("Токен содержит посторонние символы.", "err");
+        return;
+      }
+      sendToken(token);
+    });
+
+    document.getElementById("pasteBtn").addEventListener("click", function () {
+      if (!navigator.clipboard || !navigator.clipboard.readText) {
+        input.focus();
+        return;
+      }
+      navigator.clipboard.readText().then(function (text) {
+        input.value = (text || "").trim();
+      }, function () {
+        input.focus();
+      });
+    });
+
+    initOauth();
+    initHash();
+  </script>
+</body>
+</html>
